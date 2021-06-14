@@ -1,0 +1,191 @@
+---
+title: "Model"
+author: "Sameer Sapre"
+date: "4/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+We want to estimate the number of All-NBA Selections a player has remaining in their career based on the state of their career. In other words, given their age, and their most recent performances, how many All-NBA selections are they expected to win from now, until the end of their career. 
+
+There is one issue, however, and that is with the model that we would like to use. To estimate the number of All-NBA selections a player will win in the remainder of his career, we would like to use a
+
+```{r}
+
+set.seed(42)
+library(tidyverse)
+library("car")
+library(caret)
+df = read.csv('Model Set.csv')
+draft = read.csv('Draft.csv') %>% select(Player,Pick)
+draft$Pick = as.numeric(draft$Pick)
+draft$Player = as.character(draft$Player)
+df = left_join(df,draft, by = 'Player')
+### Some players are undrafterd and some are drafted in years with more than two rounds,
+# I'm adjusting the draft picks below
+# Draft Pick #61 --> undrafted
+df$Pick[is.na(df$Pick)] <- 61
+df$Pick[df$Pick > 61] <- 61
+df$Exp[df$Player=="Jaren Jackson" & df$Tm == "MEM"] = 1
+# More cleaning for player of interest
+df$Player[df$Player=="Jaren Jackson" & df$Tm == "MEM"] = "Jaren Jackson Jr."
+
+```
+
+
+```{r}
+#Make a new variable --> ALL NBA Selections earned thus far
+df = df %>% mutate(thusFar = Cumulative.AllNBA - 1)
+counts = read.csv('Yearly Article Mentions.csv')
+df = left_join(df,counts,by = c("Player","Year"))
+df$Mentions[is.na(df$Mentions)] = 0
+## Now add the cummulative ESPN mentions
+df = df %>% group_by(Player) %>% mutate(ESPN=cumsum(Mentions))
+df %>% arrange(desc(ESPN))
+```
+
+
+Keep only retired players
+```{r}
+latest_year = unique(df$Year)[length(unique(df$Year))]
+unretired_players = df %>% filter(Year == latest_year) %>% select(Player) %>% unlist(use.names = F)
+df_retired = df %>% filter(!Player %in% unretired_players)
+```
+
+
+From retired players, Find the average career length of "elite" players. Out of the players that received at least 1 All-NBA Selection. The average/median number of years a player plays is 13.
+
+```{r}
+df_retired %>% filter(All.NBA.Selections >= 1,) %>% group_by(Player) %>% summarise(n = n(), selections = mean(All.NBA.Selections)) %>% filter(n >= selections) -> usePlayers 
+usePlayers %>% select(n) %>% unlist(use.names = F) -> num_years
+
+mean(num_years)
+median(num_years)
+sample(num_years,size = 100000,replace = T) %>% mean()
+```
+
+Only take the first 12 years of retired player's careers - For our players in question, how many All-NBA teams can be expect them to make. By restricting this time interval to a certain number of years, we can meet the assumption of a poisson regression for fixed time intervals.
+```{r}
+df_retired = df_retired %>% filter(Year != 2019)
+```
+
+
+Lets see if the assumptions for Poisson Regression are met, ie) is mean = variance
+```{r}
+df_retired$AllNBA.Left %>% mean()
+var(df_retired$AllNBA.Left)
+```
+Looks pretty close
+
+```{r}
+## Correlation Matrix
+df_retired %>% ungroup %>% select_if(is.numeric) %>% cor() -> corMat
+corMat["AllNBA.Left",] %>% abs() %>% sort(decreasing = T)
+```
+
+
+Let's start our regression, but only with retired players
+```{r}
+#Traditional Stats Model
+
+summary(mod1<- glm(AllNBA.Left ~ Age + FTr + PTS + AST + TRB + X3P + G + Pos + BPM + BLK, family= poisson, data=df_retired))
+summary(mod2 <- glm(AllNBA.Left ~ thusFar + ESPN + Age + FTr + AST + PTS + TRB,data = df_retired, family = poisson))
+summary(mod3 <- glm(AllNBA.Left ~ WS + PTS + TOV + PER + GS + Pos + STL + AllNBA + Age + FT.,data = df_retired, family = poisson))
+```
+
+
+Cross-Validation by Permutation
+```{r eval=FALSE, include=FALSE}
+
+n = nrow(df_retired)
+cv_1 = numeric(n)
+cv_2 = numeric(n)
+for (i in 1:n){
+  glm_1 = glm(AllNBA.Left ~ Age + FTr + PTS + AST + TRB + X3P + G + Pos + BPM + BLK, family=poisson, data=df_retired[-i,])
+  glm_2 = glm(AllNBA.Left ~ thusFar + ESPN + Age + FTr + AST + PTS + TRB, data = df_retired[-i,], family = poisson)
+
+  new_data = df_retired[i,]
+
+  pred1 = predict(glm_1,new_data,type = "response")
+  pred2 = predict(glm_2,new_data, type = "response")
+  
+  cv_1[i] = (df_retired$AllNBA.Left - pred1)^2
+  cv_2[i] = (df_retired$AllNBA.Left - pred2)^2
+}
+hist(cv_1)
+hist(cv_2)
+mean(cv_1)
+mean(cv_2)
+```
+
+
+
+What about modeling the chances of a player making a team based on their recent performances?
+
+Let's look at this year's rookies
+```{r}
+y2019 = df %>% filter(Year == 2019)
+preds = predict(mod1,y2019,"response")
+y2019$preds = preds
+y2019 %>% filter(Exp == 1,Pick <= 5) %>% select(Player,Pick,preds) %>% arrange(desc(preds)) -> rookies2019
+
+rookies2019
+
+
+```
+
+Let's simulate the careers of the top 5 draft picks from 2019 and graph them
+```{r}
+plot_df = data.frame()
+for (i in seq(1:nrow(rookies2019))){
+  dist = rpois(1000,rookies2019$preds[i])
+  Player = rep(rookies2019$Player[i],length(dist))
+  dist_df = data.frame(Player,dist)
+  
+  if (nrow(plot_df) == 0){
+    plot_df = dist_df
+  }
+  else {
+    plot_df = bind_rows(plot_df,dist_df)
+  }
+  }
+ggplot(plot_df, aes(dist, fill = Player, colour = Player)) +
+  geom_density(alpha = 0.3,adjust = 7) + labs(title = "Estimated Amount of All-NBA Selections for 2019 Draft Picks",x = "All-NBA Selections")
+
+
+
+```
+
+
+```{r}
+y2019 %>% arrange(desc(preds))
+df_retired$fitted = mod1$fitted.values
+df_retired %>% arrange(desc(fitted))
+```
+
+```{r}
+giannis = y2019 %>% filter(Player == "Giannis Antetokounmpo")
+a24 = df_retired %>% filter(Age == 24) %>%  arrange(desc(fitted))
+
+a24[1:5,] %>% ggplot(aes(x = Player, y = fitted, fill = Player)) + geom_col() + geom_hline(yintercept = giannis$preds, linetype = "dashed",color = "red") + labs(title = "Giannis vs. All-Time Greats at Age 24", y = "Expected Number of All-NBA Selections Left in Career", caption = "*Red dashed line denotes the expected Number of All-NBA Selections for Giannis Antetokounmpo")
+```
+
+
+```{r}
+top10 = y2019 %>% arrange(desc(preds))
+
+top10[1:5,] %>% ggplot(aes(x = Player, y = preds, fill = Player)) + geom_col() + labs(title = "Highest Estimated Future Achievement in the NBA", y = "Expected Number of All-NBA Selections ") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+y2019 %>% ggplot(aes(x = Pos, y = preds, fill = Pos)) + geom_col() + labs(title = "Career Accomplishments by Position", y = "Expected Number of All-NBA Selections ")
+```
+

@@ -1,0 +1,180 @@
+---
+title: "Data-Imputation"
+author: "Austin Gongora"
+date: "4/30/2020"
+output: html_document
+---
+
+
+
+#Libraries
+```{r, echo=FALSE}
+#The library Mice is used for data imputation 
+library(mice)
+library(ggplot2)
+library(Rtsne)
+library(data.table)
+library(optparse)
+library(RColorBrewer)
+library(stringi)
+library(caret)
+library(ggplot2)
+library(RXKCD)
+library(tm)
+library(wordcloud)
+library(RColorBrewer)
+library(dplyr)
+```
+
+
+
+#Data
+Using the NBA data set. I will only take the first 100 observations for the sake of the assignments purpose. There are originally over 16,000 observations with 53 columns. 
+```{r,echo=FALSE}
+players<- read.csv("~/Desktop/NBA/stats/Joined Player Stats.csv")
+
+players <- players [1:5000,]
+```
+
+```{r, echo=FALSE}
+#Check for missing Values in Players Data Set
+anyNA(players)
+
+#Counting Number of NA for each variable 
+
+#Produe dataframe of missing NA values 
+x = as.list(sapply(players, function(x) sum(is.na(x))))
+z = as.data.frame(x[which(x>0)])
+
+```
+The report shows us that there are NA values in the dataset. So we look to do data imputation methods. 
+
+
+#Example for the assignment. 
+
+We will analyze Variable X3P. Prior and Post imputation
+X3P. is a players 3 Point Shot Percentage 
+```{r}
+cat('mean of X3P. is:' ,mean(players$X3P., na.rm = TRUE))
+cat("\nThe median of X3P. is:",median(players$X3P., na.rm = TRUE))
+```
+
+#The following figure represents the average 3 Point Shot Percentage by position prior to imputation 
+```{r}
+p <- ggplot(players, aes(y=X3P., x = Pos), )+ geom_density() +
+  stat_summary(fun=mean,geom="line",lwd=2,aes(group=1)) + ggtitle("Plot of Avg. 3Point % by Position Pre-Imputation, n = 5000") +
+  xlab("Position") + ylab("Shot %")
+
+```
+There are multiple variables that contain NA values. We use data imputation to fix this. For instance, there is 2,654 values missing for X3P. feature 
+
+Data Imputation begins.
+```{r, echo=FALSE}
+init = mice(players, maxit = 0)
+meth = init$method
+predM = init$predictorMatrix
+```
+
+
+ 
+#For purposes to show that the imputation is working 
+```{r, echo= FALSE}
+imputed = mice(players, predictorMatrix = predM, m =2)
+
+perm_impu = imputed
+
+#Imputation Functions
+imputed = complete(imputed)
+sapply(imputed, function(x) sum(is.na(x)))
+
+
+anyNA(imputed)
+```
+Post Imputation there are no longer an NA values in the new dataframe called imputed. We will now perform analysis to test how the two datasets are different. 
+
+```{r}
+cat('mean of X3P. is:' ,mean(imputed$X3P., na.rm = TRUE))
+cat("\nThe median of X3P. is:",median(imputed$X3P., na.rm = TRUE))
+```
+Reminder: 
+mean of X3P. pre-imputation was: 0.2706842
+The median of X3P. pre-imputation was: 0.261
+
+
+
+```{r}
+q <- ggplot(imputed, aes(y=X3P., x = Pos), )+ 
+  stat_summary(fun=mean,geom="line",lwd=2,aes(group=1)) + ggtitle("Plot of Avg. 3Point % by Position Post-Imputation, n = 5000") +
+  xlab("Position") + ylab("Shot %")
+
+
+p <- ggplot(players, aes(y=X3P., x = Pos), )+
+  stat_summary(fun=mean,geom="line",lwd=2,aes(group=1)) + ggtitle("Plot of Avg. 3Point % by Position Pre-Imputation, n = 5000") +
+  xlab("Position") + ylab("Shot %")
+
+```
+
+
+```{r}
+#Feature Engineer new binary variables 
+#Yes/No All NBA
+#Over Under for Average NBA PLayer POints 
+
+test_imput <- imputed %>%
+  mutate(NBA_Binary = ifelse(All.NBA.Selections > 0,1,0)) %>%
+  mutate(avg_points = ifelse(PTS > mean(imputed$PTS), 1,0)) %>%
+  mutate(good_def = ifelse (BLK. > mean(imputed$BLK.) || STL. > mean(imputed$STL.), 1,0)) %>%
+  mutate(ws_hi = ifelse(WS > mean(WS) & (WS >mean(DWS) || (WS > mean(OWS)) ), 1 ,0) ) 
+  
+
+#Set factors as numeric variables
+#test_imput$Pos<- as.numeric(factor(imputed$Pos))
+
+set.seed("1234")
+```
+
+Subset data by player 
+
+1 = Center 
+2 = PF
+3 = PG
+4 = SG 
+5 = SF
+```{r}
+#Postion 1 
+new_df <- test_imput%>%
+  filter(test_imput$Pos == 4 )%>%
+  mutate(efficient = ifelse(PER > mean(PER) ,1,0))
+
+```
+
+
+```{r}
+
+#TSNE on IMPUTED DATASET
+data = subset(new_df , select = -c(X,Player,Tm, Year, All.NBA.Selections, NBA_Binary, Age, G, ws_hi, good_def, avg_points, Pos, X
+))
+
+
+#Create a cosine similarity matrix 
+#send Drew plot and explain what is happening 
+
+# read in data (Embeddings & Sentences)
+
+tsne <- Rtsne(data,perplexity =9, stop_lying_iter =195)
+sent_tsne<-data.frame(tsne$Y)
+setnames(sent_tsne,c("X1","X2"),c("tsne_1","tsne_2"))
+#Add labels for color coding purposes
+#new_col <- c(rep("IST",5), rep("SRA",2))
+
+#Make new datatable w/ col names 
+#new_tsne <- cbind(sent_tsne, Course_Title, Course_credits)
+new_tsne <- cbind(sent_tsne, new_df$All.NBA.Selection, new_df$NBA_Binary, new_df$ws_hi, new_df$avg_points, new_df$Pos)
+
+q <- ggplot(new_tsne, aes(x=tsne_1,y=tsne_2,color=new_df$efficient)) +
+  geom_point() +
+  #theme(legend.position = c(0.3, 0.95)) +
+  ggtitle("Colored by Player Efficiency")
+q
+
+```
